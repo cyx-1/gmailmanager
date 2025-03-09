@@ -1,0 +1,54 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+.env
+.venv
+env/
+venv/
+ENV/
+
+# Coverage
+.coverage
+coverage.xml
+htmlcov/
+
+# pytest
+.pytest_cache/
+
+# mypy
+.mypy_cache/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# UV
+.uv/
+.uvenv/
+uv.lock
+
+# Gmail API credentials
+token.pickle
+credentials.json 

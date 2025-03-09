@@ -1,0 +1,14 @@
+[project]
+name = "gmailmanager"
+version = "0.1.0"
+dependencies = [
+    "google-api-python-client>=2.120.0",
+    "google-auth-oauthlib>=1.2.0",
+    "pytest>=8.0.0",
+    "pytest-cov>=4.1.0",
+    "pytest-mock>=3.12.0",
+]
+
+[tool.pytest.ini_options]
+addopts = "--cov=gmailmanager --cov-report=xml --cov-report=html"
+testpaths = ["test"] 
