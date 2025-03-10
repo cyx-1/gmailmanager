@@ -209,6 +209,147 @@ def delete_all_emails_from_sender(service, sender, email_id=None):
     except HttpError as error:
         print(f'An error occurred while deleting: {error}')
 
+def get_sender_frequencies(service, ignore_list=None, max_emails=1000):
+    """Get all promotional email senders sorted by frequency.
+    
+    Args:
+        service: Authorized Gmail API service instance.
+        ignore_list: Set of email addresses to ignore
+        max_emails: Maximum number of emails to analyze
+    
+    Returns:
+        List of tuples (sender, count, [message_ids])
+    """
+    try:
+        sender_data = {}  # {sender: {'count': n, 'messages': [ids]}}
+        page_token = None
+        total_analyzed = 0
+        
+        print(f"Analyzing up to {max_emails} promotional emails...")
+        
+        while True:
+            # Get batch of messages from promotions category
+            results = service.users().messages().list(
+                userId='me',
+                q='category:promotions',
+                maxResults=min(100, max_emails - total_analyzed),  # Adjust batch size for remaining quota
+                pageToken=page_token
+            ).execute()
+            
+            messages = results.get('messages', [])
+            if not messages:
+                break
+            
+            # Process each message in the batch
+            for message in messages:
+                msg = service.users().messages().get(
+                    userId='me',
+                    id=message['id'],
+                    format='metadata',
+                    metadataHeaders=['From']
+                ).execute()
+                
+                headers = msg['payload']['headers']
+                sender = next((h['value'] for h in headers if h['name'] == 'From'), 'Unknown')
+                
+                # Skip if sender is in ignore list
+                if ignore_list and sender in ignore_list:
+                    continue
+                
+                if sender not in sender_data:
+                    sender_data[sender] = {'count': 0, 'messages': []}
+                sender_data[sender]['count'] += 1
+                sender_data[sender]['messages'].append(message['id'])
+                
+                total_analyzed += 1
+                if total_analyzed % 100 == 0:
+                    print(f"Analyzed {total_analyzed} emails...")
+                
+                if total_analyzed >= max_emails:
+                    break
+            
+            if total_analyzed >= max_emails:
+                break
+                
+            # Get next page token
+            page_token = results.get('nextPageToken')
+            if not page_token:
+                break
+        
+        print(f"\nCompleted analysis of {total_analyzed} emails")
+        
+        # Sort senders by frequency
+        sorted_senders = sorted(
+            [(sender, data['count'], data['messages']) 
+             for sender, data in sender_data.items()],
+            key=lambda x: x[1],
+            reverse=True
+        )
+        
+        return sorted_senders
+        
+    except HttpError as error:
+        print(f'An error occurred: {error}')
+        return []
+
+def get_email_details(service, message_id):
+    """Get detailed information about a specific email.
+    
+    Args:
+        service: Authorized Gmail API service instance.
+        message_id: ID of the email to get details for
+    
+    Returns:
+        Dictionary containing email details
+    """
+    try:
+        msg = service.users().messages().get(
+            userId='me',
+            id=message_id,
+            format='full'
+        ).execute()
+        
+        headers = msg['payload']['headers']
+        subject = next((h['value'] for h in headers if h['name'] == 'Subject'), 'No Subject')
+        sender = next((h['value'] for h in headers if h['name'] == 'From'), 'Unknown')
+        
+        # Look for unsubscribe link in headers
+        unsubscribe = next((h['value'] for h in headers if h['name'].lower() == 'list-unsubscribe'), None)
+        
+        # If no unsubscribe in headers, try to find it in the email body
+        if not unsubscribe and 'parts' in msg['payload']:
+            for part in msg['payload']['parts']:
+                if part['mimeType'] == 'text/html' and 'data' in part.get('body', {}):
+                    body_html = base64.urlsafe_b64decode(part['body']['data']).decode('utf-8').lower()
+                    # Look for common unsubscribe patterns in HTML
+                    unsubscribe_patterns = [
+                        'unsubscribe</a>',
+                        'opt out</a>',
+                        'opt-out</a>'
+                    ]
+                    for pattern in unsubscribe_patterns:
+                        if pattern in body_html:
+                            href_start = body_html.rfind('href="', 0, body_html.find(pattern))
+                            if href_start != -1:
+                                href_end = body_html.find('"', href_start + 6)
+                                if href_end != -1:
+                                    unsubscribe = body_html[href_start + 6:href_end]
+                                    break
+                    if unsubscribe:
+                        break
+        
+        return {
+            'id': message_id,
+            'subject': subject,
+            'sender': sender,
+            'snippet': msg.get('snippet', ''),
+            'unsubscribe': unsubscribe
+        }
+        
+    except HttpError as error:
+        print(f'An error occurred: {error}')
+        return None
+
 def main():
     """Main function to demonstrate Gmail API functionality."""
     service = get_gmail_service()
@@ -219,38 +360,77 @@ def main():
         # Load the ignore list
         ignore_list = load_ignore_list()
         
-        while True:
-            # Get next promotional email (excluding ignored senders)
-            email = get_next_promotional_email(service, ignore_list)
-            if not email:
-                print("\nNo more promotional emails found.")
-                break
+        # Get all senders sorted by frequency (limited to 1000 emails)
+        sender_frequencies = get_sender_frequencies(service, ignore_list, max_emails=1000)
+        
+        if not sender_frequencies:
+            print("\nNo promotional emails found.")
+            return
             
-            sender = email['sender']
+        print("\nFound promotional emails from these senders:")
+        for sender, count, _ in sender_frequencies:
+            print(f"{sender}: {count} emails")
+        
+        # Process senders in batches of 10
+        batch_size = 10
+        for i in range(0, len(sender_frequencies), batch_size):
+            batch = sender_frequencies[i:i + batch_size]
             
-            # Display email information
-            print(f"\nFound email from: {sender}")
-            print(f"Subject: {email['subject']}")
-            print(f"Preview: {email['snippet'][:100]}...")
-            if email.get('unsubscribe'):
-                print(f"Unsubscribe link: {email['unsubscribe']}")
+            print(f"\n=== Processing batch {i//batch_size + 1} ===")
+            print("=" * 80)  # Separator line for better readability
             
+            # Display batch information
+            for j, (sender, count, message_ids) in enumerate(batch, 1):
+                print(f"\n{j:2d}. Sender: {sender} ({count} emails)")
+                
+                # Get details of their most recent email
+                email = get_email_details(service, message_ids[0])
+                if not email:
+                    continue
+                    
+                print(f"    Most recent subject: {email['subject']}")
+                print(f"    Preview: {email['snippet'][:100]}...")
+                if email.get('unsubscribe'):
+                    print(f"    Unsubscribe link: {email['unsubscribe']}")
+            
+            print("\n" + "=" * 80)  # Separator line for better readability
+            
+            # Process responses for the batch
             while True:
-                response = input(f"\nDo you want to ignore future emails from {sender}? (y/n/q to quit): ").lower()
-                if response == 'q':
+                print("\nFor each sender above, enter one letter:")
+                print("y - add to ignore list (keep emails)")
+                print("n - delete all emails")
+                print("s - skip this sender")
+                print("q - quit program")
+                print("\nExample: 'ynssnyynss' for 10 senders")
+                
+                responses = input(f"\nEnter {len(batch)} letters for this batch (y/n/s/q): ").lower()
+                
+                if 'q' in responses:
                     print("Exiting...")
                     return
-                elif response in ['y', 'n']:
-                    break
-                print("Please enter 'y' for yes, 'n' for no, or 'q' to quit")
+                
+                if len(responses) != len(batch) or any(r not in 'ynsq' for r in responses):
+                    print(f"Please enter exactly {len(batch)} letters (y/n/s/q), one for each sender")
+                    continue
+                    
+                break
             
-            if response == 'y':
-                print(f"Adding {sender} to ignore list...")
-                add_to_ignore_list(sender)
-            else:
-                # Delete all emails from this sender
-                delete_all_emails_from_sender(service, sender, email['id'])
-
+            print("\nProcessing responses...")
+            # Process each sender according to response
+            for (sender, count, message_ids), response in zip(batch, responses):
+                if response == 'y':
+                    print(f"Adding {sender} to ignore list...")
+                    add_to_ignore_list(sender)
+                elif response == 'n':
+                    print(f"Deleting all emails from {sender}...")
+                    delete_all_emails_from_sender(service, sender, None)
+                elif response == 's':
+                    print(f"Skipping {sender}...")
+            
+            print("\nBatch processing complete.")
+            print("=" * 80)  # Separator line for better readability
+                
     except HttpError as error:
         print(f'An error occurred: {error}')
 
